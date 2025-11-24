@@ -23,7 +23,7 @@ registros = cargar_csv("registros_horas.csv", ["id_trabajador", "fecha", "horas_
 
 st.title("🧵 Sistema de Nómina - Maquiladora Textil")
 
-tabs = st.tabs(["👤 Empleados", "⏱ Registro de horas", "💰 Nómina"])
+tabs = st.tabs(["👤 Empleados", "⏱ Registro de horas", "💰 Nómina", "📥 Importar ZKTeco"])
 
 # ---------- TAB 1: EMPLEADOS ----------
 with tabs[0]:
@@ -141,3 +141,85 @@ with tabs[2]:
                 file_name="nomina.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+  # ---------- TAB 4: IMPORTAR DESDE ZKTECO ----------
+with tabs[3]:
+    st.header("Importar registros desde ZKTeco")
+
+    st.write("Sube el archivo de reporte que exportaste del reloj ZKTeco (por USB).")
+
+    uploaded_file = st.file_uploader(
+        "Archivo de reporte (.xls, .xlsx o .csv)",
+        type=["xls", "xlsx", "csv"]
+    )
+
+    if uploaded_file is not None:
+        try:
+            # Detectar por extensión
+            nombre = uploaded_file.name.lower()
+            if nombre.endswith(".xls") or nombre.endswith(".xlsx"):
+                df_raw = pd.read_excel(uploaded_file)
+            else:
+                df_raw = pd.read_csv(uploaded_file)
+
+            st.subheader("Vista previa del archivo original")
+            st.dataframe(df_raw.head())
+
+            st.info(
+                "Ahora hay que mapear las columnas del archivo del ZKTeco "
+                "a las columnas que usa el sistema (id_trabajador, fecha, horas_trabajadas)."
+            )
+
+            # 🔴 AJUSTA ESTOS NOMBRES A TU ARCHIVO EXACTO DE ZKTECO
+            col_id = "AC-No"          # nombre real de la columna de ID en tu archivo
+            col_fecha = "Date"        # columna de fecha
+            col_entrada = "Time In"   # entrada
+            col_salida = "Time Out"   # salida
+
+            # Convertir entrada y salida a datetime
+            df_raw["entrada_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_entrada].astype(str),
+                errors="coerce"
+            )
+            df_raw["salida_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_salida].astype(str),
+                errors="coerce"
+            )
+
+            df_raw["horas_trabajadas"] = (
+                df_raw["salida_dt"] - df_raw["entrada_dt"]
+            ).dt.total_seconds() / 3600
+
+            # Convertir al formato del sistema
+            nuevos_registros = df_raw[[col_id, col_fecha, "horas_trabajadas"]].copy()
+            nuevos_registros = nuevos_registros.rename(columns={
+                col_id: "id_trabajador",
+                col_fecha: "fecha"
+            })
+
+            # Convertir fecha a formato ISO (YYYY-MM-DD)
+            nuevos_registros["fecha"] = pd.to_datetime(
+                nuevos_registros["fecha"], errors="coerce"
+            ).dt.date.astype(str)
+
+            # Cargar los registros antiguos
+            registros_existentes = cargar_csv(
+                "registros_horas.csv",
+                ["id_trabajador", "fecha", "horas_trabajadas"]
+            )
+
+            # Agregar los nuevos
+            registros_actualizados = pd.concat(
+                [registros_existentes, nuevos_registros],
+                ignore_index=True
+            )
+
+            guardar_csv(registros_actualizados, "registros_horas.csv")
+
+            st.success("Registros importados y guardados correctamente ✅")
+
+            st.subheader("Registros acumulados (después de importar)")
+            st.dataframe(registros_actualizados.tail(30))
+
+        except Exception as e:
+            st.error(f"Ocurrió un error al leer el archivo: {e}")
+
