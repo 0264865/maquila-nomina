@@ -141,11 +141,11 @@ with tabs[2]:
                 file_name="nomina.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-  # ---------- TAB 4: IMPORTAR DESDE ZKTECO ----------
+# ---------- TAB 4: IMPORTAR DESDE ZKTECO ----------
 with tabs[3]:
     st.header("Importar registros desde ZKTeco")
 
-    st.write("Sube el archivo de reporte que exportaste del reloj ZKTeco (por USB).")
+    st.write("Sube el archivo de 'Reporte de Excepciones' del ZKTeco (por USB).")
 
     uploaded_file = st.file_uploader(
         "Archivo de reporte (.xls, .xlsx o .csv)",
@@ -165,49 +165,72 @@ with tabs[3]:
             st.dataframe(df_raw.head())
 
             st.info(
-                "Ahora hay que mapear las columnas del archivo del ZKTeco "
-                "a las columnas que usa el sistema (id_trabajador, fecha, horas_trabajadas)."
+                "Verifica cómo se llaman EXACTAMENTE las columnas de ID, Fecha, "
+                "Primer Horario (Entrada/Salida) y Segundo Horario en la tabla de arriba."
             )
 
-            # 🔴 AJUSTA ESTOS NOMBRES A TU ARCHIVO EXACTO DE ZKTECO
-            col_id = "AC-No"          # nombre real de la columna de ID en tu archivo
-            col_fecha = "Date"        # columna de fecha
-            col_entrada = "Time In"   # entrada
-            col_salida = "Time Out"   # salida
+            # 🔴 AJUSTA ESTOS NOMBRES A TU ARCHIVO (COPIANDO TAL CUAL DEL ENCABEZADO QUE VEAS)
+            col_id      = "ID"                  # columna con el ID del empleado
+            col_fecha   = "Fecha"               # columna con la fecha
+            col_e1      = "Primer Horario Entrada"   # AJUSTAR al nombre real
+            col_s1      = "Primer Horario Salida"    # AJUSTAR al nombre real
+            col_e2      = "Segundo Horario Entrada"  # AJUSTAR al nombre real
+            col_s2      = "Segundo Horario Salida"   # AJUSTAR al nombre real
 
-            # Convertir entrada y salida a datetime
-            df_raw["entrada_dt"] = pd.to_datetime(
-                df_raw[col_fecha].astype(str) + " " + df_raw[col_entrada].astype(str),
+            # Crear datetimes para entrada/salida del primer horario
+            df_raw["entrada1_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_e1].astype(str),
                 errors="coerce"
             )
-            df_raw["salida_dt"] = pd.to_datetime(
-                df_raw[col_fecha].astype(str) + " " + df_raw[col_salida].astype(str),
+            df_raw["salida1_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_s1].astype(str),
                 errors="coerce"
             )
 
-            df_raw["horas_trabajadas"] = (
-                df_raw["salida_dt"] - df_raw["entrada_dt"]
-            ).dt.total_seconds() / 3600
+            # Crear datetimes para segundo horario (si lo usan)
+            df_raw["entrada2_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_e2].astype(str),
+                errors="coerce"
+            )
+            df_raw["salida2_dt"] = pd.to_datetime(
+                df_raw[col_fecha].astype(str) + " " + df_raw[col_s2].astype(str),
+                errors="coerce"
+            )
 
-            # Convertir al formato del sistema
+            # Calcular minutos de cada bloque (si falta entrada o salida, cuenta 0)
+            df_raw["min1"] = (df_raw["salida1_dt"] - df_raw["entrada1_dt"]).dt.total_seconds() / 60
+            df_raw["min2"] = (df_raw["salida2_dt"] - df_raw["entrada2_dt"]).dt.total_seconds() / 60
+
+            # Reemplazar negativos o NaN por 0
+            df_raw["min1"] = df_raw["min1"].clip(lower=0).fillna(0)
+            df_raw["min2"] = df_raw["min2"].clip(lower=0).fillna(0)
+
+            # Minutos totales del día y horas trabajadas
+            df_raw["min_totales"] = df_raw["min1"] + df_raw["min2"]
+            df_raw["horas_trabajadas"] = df_raw["min_totales"] / 60
+
+            st.subheader("Cálculo de minutos y horas (vista previa)")
+            st.dataframe(df_raw[[col_id, col_fecha, "min1", "min2", "min_totales", "horas_trabajadas"]].head())
+
+            # Crear DataFrame compatible con el sistema
             nuevos_registros = df_raw[[col_id, col_fecha, "horas_trabajadas"]].copy()
             nuevos_registros = nuevos_registros.rename(columns={
                 col_id: "id_trabajador",
                 col_fecha: "fecha"
             })
 
-            # Convertir fecha a formato ISO (YYYY-MM-DD)
+            # Fecha a formato YYYY-MM-DD
             nuevos_registros["fecha"] = pd.to_datetime(
                 nuevos_registros["fecha"], errors="coerce"
             ).dt.date.astype(str)
 
-            # Cargar los registros antiguos
+            # Cargar registros que ya existan
             registros_existentes = cargar_csv(
                 "registros_horas.csv",
                 ["id_trabajador", "fecha", "horas_trabajadas"]
             )
 
-            # Agregar los nuevos
+            # Agregar nuevos sin borrar nada
             registros_actualizados = pd.concat(
                 [registros_existentes, nuevos_registros],
                 ignore_index=True
@@ -215,11 +238,10 @@ with tabs[3]:
 
             guardar_csv(registros_actualizados, "registros_horas.csv")
 
-            st.success("Registros importados y guardados correctamente ✅")
+            st.success("Registros importados y calculados correctamente ✅")
 
             st.subheader("Registros acumulados (después de importar)")
             st.dataframe(registros_actualizados.tail(30))
 
         except Exception as e:
-            st.error(f"Ocurrió un error al leer el archivo: {e}")
-
+            st.error(f"Ocurrió un error al leer o procesar el archivo: {e}")
