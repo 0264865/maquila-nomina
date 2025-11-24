@@ -141,113 +141,134 @@ with tabs[2]:
                 file_name="nomina.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-# ------------ TAB 4: IMPORTAR DESDE ZKTECO ------------
+# ---------- TAB 4: IMPORTAR DESDE ZKTECO ----------
 with tabs[3]:
-    st.header("Importar reportes del reloj ZKTeco (automático)")
+    st.header("📥 Importar registros desde ZKTeco")
 
-    st.write("Sube el archivo ORIGINAL del reloj (Reporte de Excepciones). "
-             "La app detectará horas incluso si vienen mezcladas.")
+    st.write("Sube el archivo ORIGINAL del reloj (hoja 'Reporte de Excepciones'). "
+             "La app calculará automáticamente las horas trabajadas y las guardará en el sistema.")
 
-    uploaded = st.file_uploader(
-        "Archivo del reloj (.xls, .xlsx)",
+    uploaded_file = st.file_uploader(
+        "Archivo de reporte (.xls, .xlsx)",
         type=["xls", "xlsx"]
     )
 
-    if uploaded is not None:
+    if uploaded_file is not None:
         try:
-            df_raw = pd.read_excel(uploaded, header=None)
+            # 1) Leer SIEMPRE la hoja correcta
+            df_raw = pd.read_excel(
+                uploaded_file,
+                sheet_name="Reporte de Excepciones",  # 👈 nombre de la pestaña
+                header=None
+            )
 
-            st.subheader("Vista previa del archivo original")
-            st.dataframe(df_raw.head(20))
+            # 2) Buscar la primera fila donde la columna A tenga un ID numérico
+            mask_ids = pd.to_numeric(df_raw[0], errors="coerce").notna()
+            if not mask_ids.any():
+                st.error("No encontré ninguna fila con ID numérico en la primera columna. "
+                         "Revisa que sea la hoja 'Reporte de Excepciones'.")
+            else:
+                first_idx = mask_ids.idxmax()
 
-            # ----------  EXTRAER HORAS AUTOMÁTICAMENTE ----------
-            import re
+                # Nos quedamos desde esa fila hacia abajo y columnas A–M (0–12)
+                df = df_raw.loc[first_idx:, :12].copy()
 
-            def extraer_horas(celda):
-                """Encuentra todas las horas HH:MM en una celda sucia."""
-                if pd.isna(celda):
-                    return []
-                texto = str(celda)
-                return re.findall(r'\b\d{1,2}:\d{2}\b', texto)
+                # 3) Poner nombres reales a las columnas
+                df.columns = [
+                    "id_trabajador",   # A
+                    "nombre",          # B
+                    "departamento",    # C
+                    "fecha",           # D
+                    "entrada1",        # E
+                    "salida1",         # F
+                    "entrada2",        # G
+                    "salida2",         # H
+                    "retardos_min",    # I
+                    "salida_temp_min", # J
+                    "falta_min",       # K
+                    "total_min_excel", # L (lo que calcula el reloj)
+                    "notas"            # M
+                ]
 
-            registros = []
+                # Nos quedamos solo con filas que tengan ID
+                df["id_trabajador"] = pd.to_numeric(df["id_trabajador"], errors="coerce")
+                df = df[df["id_trabajador"].notna()]
+                df["id_trabajador"] = df["id_trabajador"].astype(int)
 
-            for idx, fila in df_raw.iterrows():
+                # 4) Limpiar fecha
+                df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+                df = df[df["fecha"].notna()]  # quitamos filas sin fecha
+                df["fecha"] = df["fecha"].dt.date  # nos quedamos con yyyy-mm-dd
 
-                # Columnas típicas del ZKTeco
-                col_id = fila[0]
-                col_fecha = fila[3] if len(fila) > 3 else None
+                # 5) Limpiar textos de horas
+                for col in ["entrada1", "salida1", "entrada2", "salida2"]:
+                    df[col] = df[col].astype(str).str.strip()
+                    df[col] = df[col].replace({"nan": None, "": None})
 
-                # Validar si es fila válida con ID y fecha real
-                if not str(col_id).isdigit():
-                    continue
-                try:
-                    fecha = pd.to_datetime(col_fecha, errors='coerce')
-                except:
-                    continue
-                if pd.isna(fecha):
-                    continue
+                # 6) Convertir horas a datetime usando una fecha ficticia
+                base_date = "2000-01-01 "
 
-                # Buscar horas en toda la fila
-                horas = []
-                for col in fila:
-                    horas += extraer_horas(col)
+                def to_dt(col):
+                    return pd.to_datetime(
+                        base_date + df[col].astype(str),
+                        format="%Y-%m-%d %H:%M",
+                        errors="coerce"
+                    )
 
-                # Tomar solo 2 o 4 horas máximo
-                horas = horas[:4]
+                df["entrada1_dt"] = to_dt("entrada1")
+                df["salida1_dt"] = to_dt("salida1")
+                df["entrada2_dt"] = to_dt("entrada2")
+                df["salida2_dt"] = to_dt("salida2")
 
-                # Asignación flexible
-                entrada1 = horas[0] if len(horas) >= 1 else None
-                salida1  = horas[1] if len(horas) >= 2 else None
-                entrada2 = horas[2] if len(horas) >= 3 else None
-                salida2  = horas[3] if len(horas) >= 4 else None
+                # 7) Calcular minutos por turno
+                def diff_min(col_ini, col_fin):
+                    mins = (df[col_fin] - df[col_ini]).dt.total_seconds() / 60
+                    mins = mins.fillna(0)
+                    mins = mins.clip(lower=0)
+                    return mins
 
-                # Convertir horas a minutos
-                def minutos(h):
-                    if h is None:
-                        return 0
-                    t = pd.to_datetime(h, format="%H:%M")
-                    return t.hour * 60 + t.minute
+                df["min1"] = diff_min("entrada1_dt", "salida1_dt")
+                df["min2"] = diff_min("entrada2_dt", "salida2_dt")
 
-                min1 = max(0, minutos(salida1) - minutos(entrada1)) if entrada1 and salida1 else 0
-                min2 = max(0, minutos(salida2) - minutos(entrada2)) if entrada2 and salida2 else 0
+                # 8) Total de minutos y horas trabajadas
+                df["min_totales"] = df["min1"] + df["min2"]
+                df["horas_trabajadas"] = df["min_totales"] / 60
 
-                min_totales = min1 + min2
-                horas_trab = round(min_totales / 60, 2)
+                st.subheader("Vista previa del cálculo de horas")
+                st.dataframe(df[[
+                    "id_trabajador", "fecha",
+                    "entrada1", "salida1",
+                    "entrada2", "salida2",
+                    "min1", "min2", "min_totales",
+                    "horas_trabajadas"
+                ]].head(40))
 
-                registros.append({
-                    "id_trabajador": int(col_id),
-                    "fecha": fecha.date(),
-                    "entrada1": entrada1,
-                    "salida1": salida1,
-                    "entrada2": entrada2,
-                    "salida2": salida2,
-                    "min1": min1,
-                    "min2": min2,
-                    "min_totales": min_totales,
-                    "horas_trabajadas": horas_trab
-                })
+                # 9) Preparar formato para el sistema
+                nuevos_registros = df[[
+                    "id_trabajador", "fecha", "horas_trabajadas"
+                ]].copy()
+                nuevos_registros["fecha"] = nuevos_registros["fecha"].astype(str)
 
-            df_final = pd.DataFrame(registros)
+                # 10) Cargar registros antiguos y unir
+                registros_existentes = cargar_csv(
+                    "registros_horas.csv",
+                    ["id_trabajador", "fecha", "horas_trabajadas"]
+                )
 
-            st.subheader("Vista previa del cálculo de horas")
-            st.dataframe(df_final)
+                registros_actualizados = pd.concat(
+                    [registros_existentes, nuevos_registros],
+                    ignore_index=True
+                )
 
-            # Cargar registros previos
-            try:
-                df_prev = pd.read_csv("registros_horas.csv")
-            except:
-                df_prev = pd.DataFrame(columns=df_final.columns)
+                # Guardar
+                guardar_csv(registros_actualizados, "registros_horas.csv")
 
-            df_out = pd.concat([df_prev, df_final], ignore_index=True)
+                st.success("Registros importados y calculados correctamente ✅")
 
-            df_out.to_csv("registros_horas.csv", index=False)
-
-            st.success("Registros importados y calculados correctamente ✔")
-
-            st.subheader("Registros acumulados (después de importar)")
-            st.dataframe(df_out.tail(50))
+                st.subheader("Registros acumulados (después de importar)")
+                st.dataframe(registros_actualizados.tail(50))
 
         except Exception as e:
-            st.error(f"Error al procesar archivo: {e}")
+            st.error(f"Ocurrió un error al leer o procesar el archivo: {e}")
+
 
