@@ -154,21 +154,20 @@ with tabs[3]:
 
     if uploaded_file is not None:
         try:
-            # 1) Leer el archivo SIN usar encabezados
-            df_raw = pd.read_excel(uploaded_file, header=None)
+            # 1) Leer TODO como texto para no perder formato de horas
+            df_raw = pd.read_excel(uploaded_file, header=None, dtype=str)
 
-            # 2) Detectar la primera fila donde realmente empieza la tabla (ID numérico)
-            #    Columna 0 = ID
+            # 2) Buscar la primera fila donde la col A (0) sea numérica (ID)
             mask_ids = pd.to_numeric(df_raw[0], errors="coerce").notna()
             if not mask_ids.any():
                 st.error("No encontré ninguna fila con ID numérico en la primera columna 😭")
             else:
-                first_idx = mask_ids.idxmax()  # primera fila con ID
+                first_idx = mask_ids.idxmax()
 
-                # Nos quedamos con las columnas A-M (0 a 12)
+                # Nos quedamos con columnas A-M (0 a 12)
                 df = df_raw.loc[first_idx:, :12].copy()
 
-                # 3) Asignar nombres a las columnas según el orden del reporte
+                # 3) Asignar nombres según el orden del reporte
                 df.columns = [
                     "id_trabajador",   # A
                     "nombre",          # B
@@ -185,29 +184,44 @@ with tabs[3]:
                     "notas"            # M
                 ]
 
-                # Quitar filas totalmente vacías
+                # Quitar filas donde no hay ID
+                df["id_trabajador"] = pd.to_numeric(df["id_trabajador"], errors="coerce")
                 df = df[df["id_trabajador"].notna()]
 
-                # 4) Convertir tipos
-                df["id_trabajador"] = pd.to_numeric(df["id_trabajador"], errors="coerce")
-                df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+                # 4) Limpiar textos
+                df["fecha"] = df["fecha"].fillna("").astype(str).str.strip()
 
-                # 5) Construir datetimes de entrada/salida
                 for col in ["entrada1", "salida1", "entrada2", "salida2"]:
-                    df[col] = df[col].astype(str).str.strip()
-                    # Si la celda está vacía, va a NaT
-                    df[col] = pd.to_datetime(
-                        df["fecha"].dt.strftime("%Y-%m-%d") + " " + df[col],
-                        errors="coerce"
-                    )
+                    df[col] = df[col].fillna("").astype(str).str.strip()
+                    df[col] = df[col].replace({"": None})
 
-                # 6) Calcular minutos trabajados por bloque
-                df["min1"] = (df["salida1"] - df["entrada1"]).dt.total_seconds() / 60
-                df["min2"] = (df["salida2"] - df["entrada2"]).dt.total_seconds() / 60
+                # 5) Construir datetimes usando una fecha ficticia
+                base_date = "2000-01-01 "
 
-                # Reemplazar NaN o negativos por 0
-                df["min1"] = df["min1"].clip(lower=0).fillna(0)
-                df["min2"] = df["min2"].clip(lower=0).fillna(0)
+                df["entrada1_dt"] = pd.to_datetime(
+                    base_date + df["entrada1"].astype(str),
+                    errors="coerce"
+                )
+                df["salida1_dt"] = pd.to_datetime(
+                    base_date + df["salida1"].astype(str),
+                    errors="coerce"
+                )
+                df["entrada2_dt"] = pd.to_datetime(
+                    base_date + df["entrada2"].astype(str),
+                    errors="coerce"
+                )
+                df["salida2_dt"] = pd.to_datetime(
+                    base_date + df["salida2"].astype(str),
+                    errors="coerce"
+                )
+
+                # 6) Calcular minutos por bloque
+                df["min1"] = (df["salida1_dt"] - df["entrada1_dt"]).dt.total_seconds() / 60
+                df["min2"] = (df["salida2_dt"] - df["entrada2_dt"]).dt.total_seconds() / 60
+
+                # Si algo sale NaN o negativo → 0
+                df["min1"] = df["min1"].fillna(0).clip(lower=0)
+                df["min2"] = df["min2"].fillna(0).clip(lower=0)
 
                 # 7) Minutos totales y horas trabajadas
                 df["min_totales"] = df["min1"] + df["min2"]
@@ -215,16 +229,15 @@ with tabs[3]:
 
                 st.subheader("Vista previa del cálculo de horas")
                 st.dataframe(
-                    df[["id_trabajador", "fecha", "min1", "min2", "min_totales", "horas_trabajadas"]].head(20)
+                    df[["id_trabajador", "fecha", "entrada1", "salida1", "entrada2", "salida2",
+                        "min1", "min2", "min_totales", "horas_trabajadas"]].head(30)
                 )
 
-                # 8) Formato final para el sistema
+                # 8) Formato final para tu sistema
                 nuevos_registros = df[["id_trabajador", "fecha", "horas_trabajadas"]].copy()
 
-                # Limpiar IDs y fechas válidas
-                nuevos_registros = nuevos_registros.dropna(subset=["id_trabajador", "fecha"])
+                # Limpiar IDs
                 nuevos_registros["id_trabajador"] = nuevos_registros["id_trabajador"].astype(int)
-                nuevos_registros["fecha"] = nuevos_registros["fecha"].dt.date.astype(str)
 
                 # 9) Cargar registros ya existentes
                 registros_existentes = cargar_csv(
