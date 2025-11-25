@@ -89,58 +89,120 @@ with tabs[1]:
 
 # ---------- TAB 3: NÓMINA ----------
 with tabs[2]:
-    st.header("Cálculo de nómina")
+    st.header("💰 Nómina por periodo")
 
-    if empleados.empty or registros.empty:
-        st.warning("Necesitas tener empleados y registros de horas para calcular nómina.")
+    # Cargar datos siempre que existan
+    empleados = cargar_csv("empleados.csv", ["id_trabajador", "nombre", "sueldo_hora"])
+    registros = cargar_csv("registros_horas.csv", ["id_trabajador", "fecha", "horas_trabajadas"])
+
+    if empleados.empty:
+        st.warning("Primero da de alta empleados en la pestaña 👤 Empleados.")
+    elif registros.empty:
+        st.warning("Aún no hay registros de horas. Importa un archivo del reloj en 📥 Importar ZKTeco.")
     else:
+        # Convertir fecha
+        registros["fecha"] = pd.to_datetime(registros["fecha"], errors="coerce")
+        registros = registros[registros["fecha"].notna()]
+
+        # Rango de fechas para el periodo de nómina
+        fecha_min = registros["fecha"].min().date()
+        fecha_max = registros["fecha"].max().date()
+
         col1, col2 = st.columns(2)
         with col1:
-            fecha_ini = st.date_input("Fecha inicio", value=date.today())
-        with col2:
-            fecha_fin = st.date_input("Fecha fin", value=date.today())
-
-        f_ini = fecha_ini.isoformat()
-        f_fin = fecha_fin.isoformat()
-
-        regs_filtrados = registros[
-            (registros["fecha"] >= f_ini) &
-            (registros["fecha"] <= f_fin)
-        ]
-
-        if regs_filtrados.empty:
-            st.info("No hay registros en el rango seleccionado.")
-        else:
-            data = regs_filtrados.merge(empleados, on="id_trabajador")
-            data["sueldo_dia"] = data["horas_trabajadas"] * data["sueldo_hora"]
-
-            st.subheader("Detalle por día")
-            st.dataframe(data)
-
-            nomina = data.groupby("id_trabajador").agg({
-                "nombre": "first",
-                "horas_trabajadas": "sum",
-                "sueldo_dia": "sum"
-            }).reset_index()
-
-            nomina = nomina.rename(columns={
-                "horas_trabajadas": "total_horas",
-                "sueldo_dia": "total_pagar"
-            })
-
-            st.subheader("Resumen de nómina")
-            st.dataframe(nomina)
-
-            buffer = BytesIO()
-            nomina.to_excel(buffer, index=False)
-            buffer.seek(0)
-
-            st.download_button(
-                label="⬇️ Descargar nómina en Excel",
-                data=buffer,
-                file_name="nomina.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            fecha_inicio = st.date_input(
+                "Fecha inicial del periodo",
+                value=fecha_min,
+                min_value=fecha_min,
+                max_value=fecha_max
             )
+        with col2:
+            fecha_fin = st.date_input(
+                "Fecha final del periodo",
+                value=fecha_max,
+                min_value=fecha_min,
+                max_value=fecha_max
+            )
+
+        if fecha_inicio > fecha_fin:
+            st.error("La fecha inicial no puede ser mayor que la fecha final.")
+        else:
+            # Filtrar registros del periodo
+            mask = (registros["fecha"].dt.date >= fecha_inicio) & \
+                   (registros["fecha"].dt.date <= fecha_fin)
+            regs_periodo = registros[mask]
+
+            if regs_periodo.empty:
+                st.warning("No hay registros de horas en ese rango de fechas.")
+            else:
+                # Agrupar horas por trabajador
+                horas_por_trabajador = (
+                    regs_periodo
+                    .groupby("id_trabajador")["horas_trabajadas"]
+                    .sum()
+                    .reset_index()
+                )
+
+                # Unir con catálogo de empleados (para nombre y sueldo)
+                nomina = horas_por_trabajador.merge(
+                    empleados,
+                    on="id_trabajador",
+                    how="left"
+                )
+
+                # Calcular pago
+                nomina["horas_trabajadas"] = nomina["horas_trabajadas"].round(2)
+                nomina["sueldo_hora"] = nomina["sueldo_hora"].round(2)
+                nomina["pago"] = (nomina["horas_trabajadas"] * nomina["sueldo_hora"]).round(2)
+
+                # Ordenar columnas bonitas
+                nomina = nomina[[
+                    "id_trabajador",
+                    "nombre",
+                    "horas_trabajadas",
+                    "sueldo_hora",
+                    "pago"
+                ]].sort_values("id_trabajador")
+
+                # Mostrar tabla resumen (esta es la que le enseñas al jefe)
+                st.subheader("Resumen de nómina por trabajador")
+                st.dataframe(nomina, hide_index=True)
+
+                # Total de la nómina
+                total_nomina = nomina["pago"].sum().round(2)
+                st.markdown(
+                    f"### 🧾 Total de la nómina del {fecha_inicio} al {fecha_fin}: **${total_nomina:,.2f} MXN**"
+                )
+
+                # Detalle opcional por día, por si algún día lo ocupas
+                with st.expander("Ver detalle por día (opcional)"):
+                    detalle = regs_periodo.merge(
+                        empleados[["id_trabajador", "nombre"]],
+                        on="id_trabajador",
+                        how="left"
+                    )
+                    detalle["fecha"] = detalle["fecha"].dt.date
+                    detalle["horas_trabajadas"] = detalle["horas_trabajadas"].round(2)
+                    st.dataframe(
+                        detalle[["id_trabajador", "nombre", "fecha", "horas_trabajadas"]],
+                        hide_index=True
+                    )
+
+                # Botón para descargar el reporte en Excel
+                from io import BytesIO
+                buffer = BytesIO()
+                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                    nomina.to_excel(writer, index=False, sheet_name="Nomina_resumen")
+                    detalle.to_excel(writer, index=False, sheet_name="Detalle_por_dia")
+                buffer.seek(0)
+
+                st.download_button(
+                    label="💾 Descargar reporte de nómina en Excel",
+                    data=buffer,
+                    file_name=f"nomina_{fecha_inicio}_a_{fecha_fin}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
 # ---------- TAB 4: IMPORTAR DESDE ZKTECO ----------
 with tabs[3]:
     st.header("📥 Importar registros desde ZKTeco")
