@@ -209,19 +209,19 @@ with tabs[3]:
     st.header("📥 Importar desde ZKTeco (Reporte de Asistencia)")
 
     st.write(
-        "Sube el archivo **1_report.xls** (o similar) que te da el reloj, "
-        "sin modificarlo. La app va a leer la hoja **'Reporte de Asistencia'**, "
-        "calcular horas, detectar faltas de marcas y guardar todo para la nómina."
+        "Sube el archivo del reloj (por ejemplo **1_report.xlsx**) sin modificarlo. "
+        "La app leerá la hoja **'Reporte de Asistencia'**, calculará las horas trabajadas "
+        "por trabajador y sacará el pago usando el sueldo por hora que diste de alta en 👤 Empleados."
     )
 
     uploaded_file = st.file_uploader(
-        "Archivo de reporte (.xls, .xlsx o .csv)",
-        type=["xls", "xlsx", "csv"],
+        "Archivo de reporte (.xlsx o .csv)",
+        type=["xlsx", "csv"],
     )
 
     if uploaded_file is not None:
         try:
-            # 1) Leer el archivo (de preferencia .xls / .xlsx)
+            # 1) Leer archivo
             if uploaded_file.name.lower().endswith(".csv"):
                 df_raw = pd.read_csv(uploaded_file, header=None)
             else:
@@ -231,118 +231,121 @@ with tabs[3]:
                     header=None
                 )
 
-            st.subheader("Vista previa del archivo original")
-            st.dataframe(df_raw.head(25))
-
-            # 2) Sacar el periodo: "Periodo: 2025-11-14 ~ 2025-11-21"
-            periodo_str = None
-            for row in df_raw.astype(str).values:
-                for val in row:
-                    if "Periodo" in val:
-                        periodo_str = val
-                        break
-                if periodo_str:
-                    break
-
-            inicio_periodo = None
-            fin_periodo = None
-            if periodo_str:
-                m = re.search(r"(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})", periodo_str)
-                if m:
-                    inicio_periodo = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-                    fin_periodo = datetime.strptime(m.group(2), "%Y-%m-%d").date()
-
-            # 3) Encontrar la fila de encabezados (donde aparece "ID:" o "ID")
-            header_row_idx = None
-            header_clean = None
-            for i, row in df_raw.iterrows():
-                row_str = row.astype(str).str.strip()
-                row_cl = row_str.str.replace(":", "", regex=False)  # quita los ':'
-                if any(val == "ID" for val in row_cl):
-                    header_row_idx = i
-                    header_clean = row_cl
-                    break
-
-            if header_row_idx is None:
-                st.error("No encontré la fila con el encabezado 'ID'. Revisa que sea la hoja correcta.")
+            # 2) Leer rango de periodo: "2025-11-14 ~ 2025-11-21"
+            periodo_texto = str(df_raw.iloc[2, 2])
+            m = re.search(r"(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})", periodo_texto)
+            if m:
+                inicio_periodo = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                fin_periodo = datetime.strptime(m.group(2), "%Y-%m-%d").date()
             else:
-                # 4) Construir cuerpo con encabezados limpios
-                df_body = df_raw.iloc[header_row_idx + 1 :].reset_index(drop=True)
-                df_body.columns = header_clean
+                inicio_periodo = None
+                fin_periodo = None
 
-                # columnas clave
-                col_id = "ID"
-                col_nombre = "Nombre"
-
-                # columnas de días (14, 15, 16, 17, etc.)
-                day_cols = [
-                    c for c in df_body.columns
-                    if str(c).strip().isdigit()
+            # 3) Buscar fila con los días (14, 15, 16, 17, etc.)
+            days_row_idx = None
+            for i, row in df_raw.iterrows():
+                vals = row.tolist()
+                nums = [
+                    v for v in vals
+                    if isinstance(v, (int, float)) and not (pd.isna(v))
                 ]
-                # respetar el orden en el archivo
-                day_cols = [c for c in df_body.columns if c in day_cols]
+                if len(nums) >= 2 and str(df_raw.iloc[i + 1, 0]).strip() == "ID:":
+                    days_row_idx = i
+                    break
 
-                # asignar fecha real a cada columna de día usando el inicio del periodo
-                if inicio_periodo is not None:
-                    col_to_date = {
-                        col: inicio_periodo + timedelta(days=i)
-                        for i, col in enumerate(day_cols)
-                    }
-                else:
-                    col_to_date = {col: str(col) for col in day_cols}
+            if days_row_idx is None:
+                st.error("No encontré la fila con los días del periodo.")
+            else:
+                days_row = df_raw.iloc[days_row_idx]
 
-                # --- Funciones auxiliares ---
-                def parse_times(cell):
-                    """Regresa lista de horas tipo ['08:03','13:58','15:03','19:02']."""
-                    if pd.isna(cell):
+                # Mapa: columna -> día del mes (14,15,...)
+                col_day = {}
+                for col_idx, val in days_row.items():
+                    if isinstance(val, (int, float)) and not pd.isna(val):
+                        col_day[col_idx] = int(val)
+
+                # Función para mapear día (14,15...) a fecha real del periodo
+                def map_day_to_date(day_num, start_date, end_date):
+                    if not start_date or not end_date:
+                        return None
+                    for offset in range((end_date - start_date).days + 1):
+                        d = start_date + timedelta(days=offset)
+                        if d.day == day_num:
+                            return d
+                    return None
+
+                # Buscar filas con "ID:"
+                id_rows = [
+                    i for i, v in enumerate(df_raw[0].astype(str))
+                    if v.strip() == "ID:"
+                ]
+
+                def parse_times_cell(text):
+                    if pd.isna(text):
                         return []
-                    text = str(cell)
-                    return re.findall(r"(\d{1,2}:\d{2})", text)
+                    s = str(text)
+                    return re.findall(r"(\d{1,2}:\d{2})", s)
 
                 def minutos_entre(t1, t2):
                     t1_dt = datetime.strptime(t1, "%H:%M")
                     t2_dt = datetime.strptime(t2, "%H:%M")
                     return int((t2_dt - t1_dt).total_seconds() // 60)
 
-                registros_list = []
+                registros = []
 
-                # 5) Recorrer cada persona y cada día
-                for _, row in df_body.iterrows():
-                    id_trab = row.get(col_id, None)
-                    nombre = row.get(col_nombre, None)
+                # 4) Recorrer cada trabajador (par de filas: ID + horarios)
+                for id_row in id_rows:
+                    fila_id = df_raw.iloc[id_row]
 
-                    if pd.isna(id_trab) or str(id_trab).strip() == "":
-                        continue
+                    # ID numérico (en la fila del ID)
+                    id_val = None
+                    for v in fila_id:
+                        if isinstance(v, (int, float)) and not pd.isna(v):
+                            id_val = int(v)
+                            break
+                        if isinstance(v, str) and v.strip().isdigit():
+                            id_val = int(v)
+                            break
 
-                    for col in day_cols:
-                        cell = row[col]
-                        tiempos = parse_times(cell)
-                        fecha_val = col_to_date[col]
+                    # Nombre (buscamos "Nombre:" y el valor 2 columnas después)
+                    nombre = None
+                    name_idx = None
+                    for idx, val in enumerate(fila_id):
+                        if isinstance(val, str) and val.strip() == "Nombre:":
+                            name_idx = idx
+                            break
+                    if name_idx is not None and name_idx + 2 < len(fila_id):
+                        posible_nombre = fila_id[name_idx + 2]
+                        if isinstance(posible_nombre, str):
+                            nombre = posible_nombre.strip()
 
-                        if isinstance(fecha_val, date):
-                            fecha_dt = fecha_val
-                        else:
-                            fecha_dt = fecha_val
+                    # Fila con los horarios
+                    fila_horas = df_raw.iloc[id_row + 1]
+
+                    # Revisar cada columna que represente un día
+                    for col_idx, day_num in col_day.items():
+                        cell = fila_horas[col_idx]
+                        tiempos = parse_times_cell(cell)
+                        if not tiempos:
+                            # sin registro ese día
+                            continue
+
+                        fecha = map_day_to_date(day_num, inicio_periodo, fin_periodo)
 
                         entrada1 = salida1 = entrada2 = salida2 = None
-                        observ = []
                         minutos = 0
 
-                        # analizar cuántas marcas hay
-                        if len(tiempos) == 0:
-                            observ.append("SIN REGISTRO")
-                        elif len(tiempos) == 1:
+                        # Reglas: tú escogiste NO calcular segundo horario si está incompleto
+                        if len(tiempos) == 1:
                             entrada1 = tiempos[0]
-                            observ.append("FALTA SALIDA (solo una marca)")
+                            # sin salida1 -> 0 minutos
                         elif len(tiempos) == 2:
                             entrada1, salida1 = tiempos[0], tiempos[1]
                             minutos += minutos_entre(entrada1, salida1)
-                            observ.append("SIN 2° HORARIO")
                         elif len(tiempos) == 3:
-                            entrada1, salida1 = tiempos[0], tiempos[1]
-                            entrada2 = tiempos[2]
+                            entrada1, salida1, entrada2 = tiempos[0], tiempos[1], tiempos[2]
                             minutos += minutos_entre(entrada1, salida1)
-                            observ.append("FALTA SALIDA 2° HORARIO")
+                            # segundo horario pendiente, NO lo calculamos
                         else:
                             entrada1, salida1, entrada2, salida2 = (
                                 tiempos[0],
@@ -352,117 +355,115 @@ with tabs[3]:
                             )
                             minutos += minutos_entre(entrada1, salida1)
                             minutos += minutos_entre(entrada2, salida2)
-                            if len(tiempos) > 4:
-                                observ.append("Más de 4 marcas, revisar")
+                            # ignoramos marcas extra si las hay
 
-                        # minutos esperados según el día (horarios Dalay)
-                        if isinstance(fecha_dt, date):
-                            weekday = fecha_dt.weekday()  # 0 = lunes
+                        # minutos esperados según día de la semana (Dalay)
+                        min_esperados = None
+                        if isinstance(fecha, date):
+                            weekday = fecha.weekday()  # 0=lun
                             if weekday in (0, 2, 4):      # lun/mie/vie
                                 min_esperados = 10 * 60   # 10 horas
                             elif weekday in (1, 3):       # mar/jue
                                 min_esperados = 9 * 60    # 9 horas
                             else:
                                 min_esperados = 0
-                        else:
-                            min_esperados = None
 
-                        if not min_esperados:
-                            min_falt = None
-                        else:
-                            min_falt = max(min_esperados - minutos, 0)
-                            if min_falt > 0 and "SIN REGISTRO" not in observ:
-                                observ.append("MINUTOS FALTANTES")
+                        min_faltantes = None
+                        if min_esperados:
+                            min_faltantes = max(min_esperados - minutos, 0)
 
-                        registros_list.append(
+                        registros.append(
                             {
-                                "id_trabajador": id_trab,
+                                "id_trabajador": id_val,
                                 "nombre": nombre,
-                                "fecha": fecha_dt,
-                                "entrada1": entrada1,
-                                "salida1": salida1,
-                                "entrada2": entrada2,
-                                "salida2": salida2,
+                                "fecha": fecha,
+                                "dia": day_num,
                                 "min_trabajados": minutos,
                                 "min_esperados": min_esperados,
-                                "min_faltantes": min_falt,
-                                "observaciones": "; ".join(observ),
+                                "min_faltantes": min_faltantes,
                             }
                         )
 
-                registros_df = pd.DataFrame(registros_list)
+                if not registros:
+                    st.warning("No se encontraron registros de horarios en el archivo.")
+                else:
+                    registros_df = pd.DataFrame(registros)
 
-                # 6) Detalle por día (para revisar marcas y faltantes)
-                st.subheader("Detalle por día")
-                st.dataframe(registros_df, hide_index=True)
+                    # 5) Crear horas_trabajadas y lo que se guardará para la nómina
+                    registros_df["horas_trabajadas"] = registros_df["min_trabajados"] / 60.0
 
-                # 7) Pasar a horas y preparar para nómina
-                registros_df["horas_trabajadas"] = registros_df["min_trabajados"] / 60.0
+                    registros_nomina = registros_df[["id_trabajador", "fecha", "horas_trabajadas"]].copy()
 
-                registros_nomina = registros_df[["id_trabajador", "fecha", "horas_trabajadas"]]
-
-                # 8) Guardar en registros_horas.csv (se sumará en la pestaña Nómina)
-                registros_anteriores = cargar_csv(
-                    "registros_horas.csv",
-                    ["id_trabajador", "fecha", "horas_trabajadas"],
-                )
-                registros_totales = pd.concat(
-                    [registros_anteriores, registros_nomina],
-                    ignore_index=True,
-                )
-                guardar_csv(registros_totales, "registros_horas.csv")
-
-                st.success("Registros importados, calculados y guardados correctamente ✅")
-
-                # 9) RESUMEN POR TRABAJADOR (HORAS Y SUELDO)
-                st.subheader("Resumen por trabajador (horas y pago del periodo)")
-
-                # sumar minutos por trabajador
-                resumen = (
-                    registros_df.groupby(["id_trabajador", "nombre"], as_index=False)
-                    .agg(
-                        min_trabajados_total=("min_trabajados", "sum"),
-                        min_esperados_total=("min_esperados", "sum"),
-                        min_faltantes_total=("min_faltantes", "sum"),
+                    # 6) Guardar / acumular en registros_horas.csv
+                    registros_anteriores = cargar_csv(
+                        "registros_horas.csv",
+                        ["id_trabajador", "fecha", "horas_trabajadas"],
                     )
-                )
-                resumen["horas_trabajadas"] = resumen["min_trabajados_total"] / 60.0
+                    registros_totales = pd.concat(
+                        [registros_anteriores, registros_nomina],
+                        ignore_index=True,
+                    )
+                    guardar_csv(registros_totales, "registros_horas.csv")
 
-                # unir con sueldos (pestaña Empleados)
-                emp = empleados.copy()
-                emp["id_trabajador"] = emp["id_trabajador"].astype(str)
-                resumen["id_trabajador"] = resumen["id_trabajador"].astype(str)
+                    # 7) RESUMEN FINAL POR TRABAJADOR (LO QUE QUIERE EL JEFE)
+                    resumen = (
+                        registros_df.groupby(["id_trabajador", "nombre"], as_index=False)
+                        .agg(
+                            min_trabajados_total=("min_trabajados", "sum"),
+                        )
+                    )
+                    resumen["horas_trabajadas"] = resumen["min_trabajados_total"] / 60.0
 
-                resumen = resumen.merge(
-                    emp[["id_trabajador", "sueldo_hora"]],
-                    on="id_trabajador",
-                    how="left",
-                )
+                    # Cargar sueldos desde empleados.csv
+                    empleados = cargar_csv("empleados.csv", ["id_trabajador", "nombre", "sueldo_hora"])
+                    if not empleados.empty:
+                        # Asegurar mismo tipo para unir
+                        empleados["id_trabajador"] = empleados["id_trabajador"].astype(int)
+                        resumen["id_trabajador"] = resumen["id_trabajador"].astype(int)
 
-                resumen["sueldo_hora"] = resumen["sueldo_hora"].fillna(0.0)
-                resumen["pago_periodo"] = resumen["horas_trabajadas"] * resumen["sueldo_hora"]
+                        resumen = resumen.merge(
+                            empleados[["id_trabajador", "sueldo_hora"]],
+                            on="id_trabajador",
+                            how="left",
+                        )
+                    else:
+                        resumen["sueldo_hora"] = 0.0
 
-                st.dataframe(
-                    resumen[
-                        [
-                            "id_trabajador",
-                            "nombre",
-                            "horas_trabajadas",
-                            "sueldo_hora",
-                            "pago_periodo",
-                            "min_trabajados_total",
-                            "min_esperados_total",
-                            "min_faltantes_total",
-                        ]
-                    ],
-                    hide_index=True,
-                )
+                    resumen["sueldo_hora"] = resumen["sueldo_hora"].fillna(0.0)
+                    resumen["pago_periodo"] = resumen["horas_trabajadas"] * resumen["sueldo_hora"]
 
-                total_nomina = resumen["pago_periodo"].sum()
-                st.markdown(f"### 💵 Total de nómina del periodo: **${total_nomina:,.2f} MXN**")
+                    resumen["horas_trabajadas"] = resumen["horas_trabajadas"].round(2)
+                    resumen["pago_periodo"] = resumen["pago_periodo"].round(2)
+
+                    resumen = resumen[
+                        ["id_trabajador", "nombre", "horas_trabajadas", "sueldo_hora", "pago_periodo"]
+                    ].sort_values("id_trabajador")
+
+                    st.subheader("Resumen final de horas y pago por trabajador (solo este archivo)")
+                    st.dataframe(resumen, hide_index=True)
+
+                    total_nomina = resumen["pago_periodo"].sum()
+                    st.markdown(
+                        f"### 💵 Total de nómina de este reporte: **${total_nomina:,.2f} MXN**"
+                    )
+
+                    # 8) Botón para descargar el reporte en Excel
+                    from io import BytesIO
+                    buffer = BytesIO()
+                    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                        resumen.to_excel(writer, index=False, sheet_name="Nomina_resumen")
+                    buffer.seek(0)
+
+                    st.download_button(
+                        label="💾 Descargar reporte de nómina en Excel",
+                        data=buffer,
+                        file_name="nomina_reporte_asistencia.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
 
         except Exception as e:
             st.error(f"Ocurrió un error al leer el archivo: {e}")
+
 
 
 
