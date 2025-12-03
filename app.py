@@ -25,7 +25,13 @@ registros = cargar_csv("registros_horas.csv", ["id_trabajador", "fecha", "horas_
 
 st.title("🧵 Sistema de Nómina - Maquiladora Textil")
 
-tabs = st.tabs(["👤 Empleados", "⏱ Registro de horas", "💰 Nómina", "📥 Importar ZKTeco"])
+tabs = st.tabs([
+    "👤 Empleados",
+    "⏱ Registro de horas",
+    "💰 Nómina",
+    "🔐 Importar Excel protegido",
+    "📥 Importar ZKTeco",
+])
 
 # ---------- TAB 1: EMPLEADOS ----------
 with tabs[0]:
@@ -204,8 +210,112 @@ with tabs[2]:
                     file_name=f"nomina_{fecha_inicio}_a_{fecha_fin}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-# ---------- TAB 4: IMPORTAR DESDE ZKTECO (REPORTE DE ASISTENCIA) ----------
+# ---------- TAB 4: IMPORTAR EXCEL PROTEGIDO (HORARIOS) ----------
 with tabs[3]:
+    st.header("Importar horarios desde un Excel protegido")
+
+    st.write(
+        "Sube el archivo original (aunque tenga celdas bloqueadas). "
+        "La app lo leerá en modo solo-lectura y no modificará el archivo. "
+        "Selecciona las columnas de ID, fecha, entrada y salida para calcular las horas."
+    )
+
+    archivo_protegido = st.file_uploader(
+        "Archivo Excel con marcas de entrada/salida",
+        type=["xls", "xlsx"],
+        key="uploader_excel_protegido",
+    )
+
+    if archivo_protegido is not None:
+        try:
+            contenido = archivo_protegido.getvalue()
+            buffer_excel = BytesIO(contenido)
+            xls = pd.ExcelFile(buffer_excel, engine="openpyxl")
+
+            hoja = st.selectbox("Hoja a leer", xls.sheet_names)
+
+            # Reposicionar el buffer para leer la hoja elegida
+            buffer_excel.seek(0)
+            df_excel = pd.read_excel(
+                BytesIO(contenido), sheet_name=hoja, engine="openpyxl"
+            )
+
+            st.subheader("Vista previa")
+            st.dataframe(df_excel.head(20))
+
+            columnas = list(df_excel.columns)
+
+            def sugerir_columna(patron):
+                for idx, col in enumerate(columnas):
+                    if re.search(patron, str(col), re.IGNORECASE):
+                        return idx
+                return 0
+
+            col_id = st.selectbox(
+                "Columna de ID trabajador",
+                columnas,
+                index=sugerir_columna(r"id|empleado|trabajador"),
+            )
+            col_fecha = st.selectbox(
+                "Columna de fecha",
+                columnas,
+                index=sugerir_columna(r"fecha|dia|día"),
+            )
+            col_entrada = st.selectbox(
+                "Columna de hora de entrada",
+                columnas,
+                index=sugerir_columna(r"entrada|in"),
+            )
+            col_salida = st.selectbox(
+                "Columna de hora de salida",
+                columnas,
+                index=sugerir_columna(r"salida|out"),
+            )
+
+            def calcular_horas(fila):
+                e = fila["entrada"]
+                s = fila["salida"]
+                if pd.isna(e) or pd.isna(s):
+                    return 0
+                try:
+                    entrada_dt = datetime.combine(date.min, pd.to_datetime(e).time())
+                    salida_dt = datetime.combine(date.min, pd.to_datetime(s).time())
+                    if salida_dt < entrada_dt:
+                        # cruza medianoche
+                        salida_dt = salida_dt.replace(day=salida_dt.day + 1)
+                    return (salida_dt - entrada_dt).total_seconds() / 3600
+                except Exception:
+                    return 0
+
+            df_limpio = pd.DataFrame({
+                "id_trabajador": df_excel[col_id],
+                "fecha": pd.to_datetime(df_excel[col_fecha], errors="coerce").dt.date,
+                "entrada": df_excel[col_entrada],
+                "salida": df_excel[col_salida],
+            })
+
+            df_limpio["horas_trabajadas"] = df_limpio.apply(calcular_horas, axis=1)
+
+            df_limpio = df_limpio.dropna(subset=["id_trabajador", "fecha"])
+            df_limpio["id_trabajador"] = df_limpio["id_trabajador"].astype(int)
+
+            st.subheader("Registros listos para importar")
+            st.dataframe(
+                df_limpio[["id_trabajador", "fecha", "horas_trabajadas"]].head(30),
+                hide_index=True,
+            )
+
+            if st.button("Agregar a registros de horas", key="importar_excel_protegido"):
+                registros_nuevos = df_limpio[["id_trabajador", "fecha", "horas_trabajadas"]]
+                registros = pd.concat([registros, registros_nuevos], ignore_index=True)
+                guardar_csv(registros, "registros_horas.csv")
+                st.success("Registros importados y guardados ✅")
+
+        except Exception as e:
+            st.error(f"No pude leer el Excel protegido: {e}")
+
+# ---------- TAB 5: IMPORTAR DESDE ZKTECO (REPORTE DE ASISTENCIA) ----------
+with tabs[4]:
     st.header("Importar desde ZKTeco (Reporte de Asistencia)")
 
     st.write(
