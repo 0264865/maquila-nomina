@@ -155,19 +155,27 @@ with tabs[2]:
 # =============== TAB 4 ======================
 # ============================================
 
-with tabs[3]:
-    st.header("Importar horarios desde un Excel protegido")
-
-    archivo_protegido = st.file_uploader(
-        "Archivo Excel con columnas simples (ID, fecha, entrada, salida)",
-        type=["xls", "xlsx"]
-    )
-
     if archivo_protegido is not None:
-        df = pd.read_excel(archivo_protegido)
-        st.dataframe(df.head())
+        nombre = archivo_protegido.name.lower()
 
-        st.info("Aquí solo funciona si tu archivo trae columnas simples (ID, fecha, entrada, salida).")
+        # Elegimos engine según la extensión
+        if nombre.endswith(".xlsx"):
+            engine = "openpyxl"
+        else:
+            engine = "xlrd"
+
+        try:
+            df = pd.read_excel(archivo_protegido, engine=engine)
+        except ImportError:
+            st.error(
+                "Falta instalar la librería para leer Excel "
+                "(openpyxl para .xlsx y xlrd para .xls). "
+                "Revisa que estén en requirements.txt."
+            )
+            st.stop()
+
+        st.subheader("Vista previa del archivo")
+        st.dataframe(df.head(20))
 
 
 # ============================================
